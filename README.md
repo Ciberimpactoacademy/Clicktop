@@ -206,3 +206,34 @@ Aí pode:
 - Apagar cliente e respetivo histórico.
 
 Atenção: ao apagar um cliente, são removidos todos os movimentos desse cliente.
+
+
+## Atualização — Gestão de movimentos
+
+Foi acrescentado o separador:
+
+```text
+🧾 Movimentos
+```
+
+Neste separador pode:
+
+- Ver todos os movimentos;
+- Filtrar por cliente;
+- Filtrar por tipo de movimento;
+- Pesquisar por descrição, técnico ou solicitado por;
+- Selecionar um movimento pelo ID;
+- Apagar movimentos;
+- Recalcular automaticamente os saldos depois da eliminação.
+
+Para acrescentar movimentos, usar o separador:
+
+```text
+➕ Registar movimento
+```
+
+Aí pode registar:
+
+- Compra de pack;
+- Intervenção / horas utilizadas;
+- Ajuste.

@@ -548,8 +548,8 @@ col5.metric("Alertas", f"{alertas}")
 
 st.divider()
 
-aba_dashboard, aba_cliente, aba_clientes, aba_registar, aba_editar, aba_importar, aba_exportar = st.tabs(
-    ["📊 Dashboard", "👤 Cliente", "👥 Clientes", "➕ Registar movimento", "✏️ Gestão rápida", "📥 Importar", "⬇️ Exportar"]
+aba_dashboard, aba_cliente, aba_clientes, aba_registar, aba_movimentos, aba_importar, aba_exportar = st.tabs(
+    ["📊 Dashboard", "👤 Cliente", "👥 Clientes", "➕ Registar movimento", "🧾 Movimentos", "📥 Importar", "⬇️ Exportar"]
 )
 
 # ============================================================
@@ -883,62 +883,174 @@ with aba_registar:
                     st.rerun()
 
 # ============================================================
-# GESTÃO RÁPIDA
+# MOVIMENTOS
 # ============================================================
 
-with aba_editar:
-    st.subheader("Gestão rápida")
+with aba_movimentos:
+    st.subheader("Gestão de movimentos")
 
-    st.info(
-        "Para segurança, esta área permite remover o último movimento por ID. "
-        "Alterações completas linha a linha podem ser feitas diretamente no Google Sheets."
+    st.write(
+        "Aqui pode consultar, filtrar e apagar movimentos já registados. "
+        "Para acrescentar um novo movimento, use o separador **➕ Registar movimento**."
     )
 
     if df_base.empty:
-        st.write("Não existem movimentos.")
+        st.info("Ainda não existem movimentos registados.")
     else:
-        ultimos = df_base.sort_values("ID", ascending=False).head(20)
-        st.write("Últimos movimentos registados")
+        df_mov = df_base.copy()
+        df_mov["Data"] = pd.to_datetime(df_mov["Data"], errors="coerce")
+        df_mov["Data de registo"] = pd.to_datetime(df_mov["Data de registo"], errors="coerce")
+
+        col_f1, col_f2, col_f3 = st.columns([1.4, 1.4, 2])
+
+        with col_f1:
+            clientes_mov = ["Todos"] + sorted(df_mov["Cliente"].dropna().unique().tolist())
+            cliente_mov = st.selectbox("Filtrar por cliente", clientes_mov, key="mov_cliente")
+
+        with col_f2:
+            tipos_mov = ["Todos"] + sorted([x for x in df_mov["Tipo"].dropna().unique().tolist() if x])
+            tipo_mov = st.selectbox("Filtrar por tipo", tipos_mov, key="mov_tipo")
+
+        with col_f3:
+            pesquisa_mov = st.text_input(
+                "Pesquisar na descrição, técnico ou solicitado por",
+                key="mov_pesquisa",
+            )
+
+        df_mov_filtrado = df_mov.copy()
+
+        if cliente_mov != "Todos":
+            df_mov_filtrado = df_mov_filtrado[df_mov_filtrado["Cliente"] == cliente_mov]
+
+        if tipo_mov != "Todos":
+            df_mov_filtrado = df_mov_filtrado[df_mov_filtrado["Tipo"] == tipo_mov]
+
+        if pesquisa_mov:
+            termo = pesquisa_mov.lower()
+            df_mov_filtrado = df_mov_filtrado[
+                df_mov_filtrado["Descrição da intervenção"].fillna("").str.lower().str.contains(termo)
+                | df_mov_filtrado["Técnico"].fillna("").str.lower().str.contains(termo)
+                | df_mov_filtrado["Solicitada por"].fillna("").str.lower().str.contains(termo)
+            ]
+
+        df_mov_filtrado = df_mov_filtrado.sort_values(["Data", "ID"], ascending=[False, False])
+
+        st.markdown("### Lista de movimentos")
+
+        colunas_visiveis = [
+            "ID",
+            "Data",
+            "Cliente",
+            "Tipo",
+            "Solicitada por",
+            "Técnico",
+            "Descrição da intervenção",
+            "Horas Pack",
+            "Horas Usadas",
+            "Saldo Automático",
+            "Registado por",
+            "Data de registo",
+        ]
+
         st.dataframe(
-            ultimos[
-                [
-                    "ID",
-                    "Cliente",
-                    "Data",
-                    "Tipo",
-                    "Técnico",
-                    "Descrição da intervenção",
-                    "Horas Pack",
-                    "Horas Usadas",
-                    "Registado por",
-                ]
-            ],
+            df_mov_filtrado[colunas_visiveis],
             use_container_width=True,
             hide_index=True,
+            column_config={
+                "Data": st.column_config.DateColumn("Data", format="DD/MM/YYYY"),
+                "Data de registo": st.column_config.DatetimeColumn("Data de registo", format="DD/MM/YYYY HH:mm"),
+                "Horas Pack": st.column_config.NumberColumn("Horas Pack", format="%.2f h"),
+                "Horas Usadas": st.column_config.NumberColumn("Horas Usadas", format="%.2f h"),
+                "Saldo Automático": st.column_config.NumberColumn("Saldo Automático", format="%.2f h"),
+            },
         )
 
-        id_remover = st.number_input("ID do movimento a remover", min_value=0, value=0, step=1)
-        confirmar_remocao = st.checkbox("Confirmo que pretendo remover este movimento")
+        st.divider()
+        st.markdown("### Apagar movimento")
 
-        if st.button("Remover movimento"):
-            if not confirmar_remocao:
-                st.error("Confirme a remoção antes de continuar.")
-            elif id_remover == 0:
-                st.error("Indique um ID válido.")
-            elif id_remover not in pd.to_numeric(df_base["ID"], errors="coerce").dropna().astype(int).tolist():
-                st.error("ID não encontrado.")
-            else:
-                novo_df = df_base[pd.to_numeric(df_base["ID"], errors="coerce").astype("Int64") != int(id_remover)]
-                if modo_google:
-                    gravar_dataframe_google(novo_df)
-                    st.cache_data.clear()
-                    st.cache_resource.clear()
-                    st.success("Movimento removido no Google Sheets.")
-                    st.rerun()
+        st.warning(
+            "Ao apagar um movimento, o saldo do cliente será recalculado automaticamente. "
+            "Esta ação remove a linha do histórico."
+        )
+
+        if df_mov_filtrado.empty:
+            st.info("Não existem movimentos nos filtros selecionados.")
+        else:
+            opcoes_mov = []
+            mapa_mov = {}
+
+            for _, row in df_mov_filtrado.iterrows():
+                data_txt = ""
+                if pd.notna(row.get("Data")):
+                    data_txt = pd.to_datetime(row.get("Data")).strftime("%d/%m/%Y")
+
+                horas_txt = ""
+                if float(row.get("Horas Pack", 0) or 0) > 0:
+                    horas_txt = f"+{float(row.get('Horas Pack', 0)):.2f}h pack"
+                elif float(row.get("Horas Usadas", 0) or 0) > 0:
+                    horas_txt = f"-{float(row.get('Horas Usadas', 0)):.2f}h usadas"
                 else:
-                    st.session_state["df_demo"] = novo_df
-                    st.success("Movimento removido na sessão de demonstração.")
-                    st.rerun()
+                    horas_txt = "0h"
+
+                label = (
+                    f"ID {int(row['ID'])} | {data_txt} | {row['Cliente']} | "
+                    f"{row['Tipo']} | {horas_txt}"
+                )
+
+                opcoes_mov.append(label)
+                mapa_mov[label] = int(row["ID"])
+
+            movimento_escolhido = st.selectbox(
+                "Selecionar movimento a apagar",
+                opcoes_mov,
+                key="movimento_apagar_select",
+            )
+
+            id_remover = mapa_mov.get(movimento_escolhido)
+
+            detalhe = df_base[pd.to_numeric(df_base["ID"], errors="coerce") == id_remover]
+            if not detalhe.empty:
+                st.write("Movimento selecionado:")
+                st.dataframe(
+                    detalhe[colunas_visiveis],
+                    use_container_width=True,
+                    hide_index=True,
+                )
+
+            confirmar_id = st.text_input(
+                "Para confirmar, escreva o ID do movimento",
+                key="confirmar_id_movimento",
+            )
+
+            confirmar_remocao = st.checkbox(
+                "Confirmo que quero apagar este movimento",
+                key="confirmar_delete_movimento",
+            )
+
+            if st.button("Apagar movimento selecionado"):
+                if str(id_remover) != confirmar_id.strip():
+                    st.error("O ID escrito não corresponde ao movimento selecionado.")
+                elif not confirmar_remocao:
+                    st.error("Confirme a eliminação antes de continuar.")
+                else:
+                    ids_numericos = pd.to_numeric(df_base["ID"], errors="coerce").astype("Int64")
+                    novo_df = df_base[ids_numericos != int(id_remover)].copy()
+                    novo_df = recalcular_saldos(novo_df)
+
+                    if modo_google:
+                        gravar_dataframe_google(novo_df)
+                        st.cache_data.clear()
+                        st.cache_resource.clear()
+                        st.success("Movimento apagado no Google Sheets e saldos recalculados.")
+                        st.rerun()
+                    else:
+                        st.session_state["df_demo"] = novo_df
+                        st.success("Movimento apagado nesta sessão de demonstração e saldos recalculados.")
+                        st.rerun()
+
+        st.divider()
+        st.markdown("### Acrescentar movimento")
+        st.info("Para acrescentar uma compra de pack, intervenção ou ajuste, use o separador **➕ Registar movimento**.")
 
 # ============================================================
 # IMPORTAR
