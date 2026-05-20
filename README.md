@@ -173,3 +173,36 @@ Não precisam de conta Streamlit, GitHub ou Google Cloud.
 
 Esta é uma proteção simples por palavra-passe partilhada.  
 Se um colaborador sair da empresa, altere a palavra-passe nos Secrets.
+
+
+## Atualização incluída nesta versão
+
+Esta versão foi ajustada para:
+
+- Usar o Excel `PACKS_DE_HORAS_AUTOMATIZADO.xlsx` enviado pela utilizadora;
+- Ter palavra-passe padrão `Click123`;
+- Permitir adicionar clientes diretamente na app;
+- Permitir apagar clientes diretamente na app;
+- Usar lista fixa de técnicos:
+  - Clicktop
+  - Ivan Lopes
+  - Luis Lopes
+  - Miguel Carvalho
+  - Rodrigo Cândido
+
+### Gestão de clientes
+
+Na app, usar o separador:
+
+```text
+👥 Clientes
+```
+
+Aí pode:
+
+- Adicionar cliente novo;
+- Criar cliente sem pack inicial;
+- Criar cliente já com pack inicial;
+- Apagar cliente e respetivo histórico.
+
+Atenção: ao apagar um cliente, são removidos todos os movimentos desse cliente.

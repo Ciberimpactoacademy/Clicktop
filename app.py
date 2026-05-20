@@ -41,7 +41,8 @@ COLUNAS_BASE = [
     "Data de registo",
 ]
 
-TIPOS_MOVIMENTO = ["Intervenção", "Compra", "Ajuste"]
+TIPOS_MOVIMENTO = ["Intervenção", "Compra", "Ajuste", "Cliente criado"]
+TECNICOS_FIXOS = ["Clicktop", "Ivan Lopes", "Luis Lopes", "Miguel Carvalho", "Rodrigo Cândido"]
 NOME_FOLHA = "Base_Lancamentos"
 
 # ============================================================
@@ -122,7 +123,7 @@ def obter_app_password():
     APP_PASSWORD = "a-sua-palavra-passe"
     """
     try:
-        return st.secrets.get("APP_PASSWORD", "")
+        return st.secrets.get("APP_PASSWORD", "Click123")
     except Exception:
         return ""
 
@@ -138,13 +139,6 @@ def verificar_acesso():
     st.write("Introduza a palavra-passe para aceder à gestão de packs de horas.")
 
     password_configurada = obter_app_password()
-
-    if not password_configurada:
-        st.error(
-            "A palavra-passe da app ainda não está configurada. "
-            "No Streamlit, vá a Settings > Secrets e adicione APP_PASSWORD."
-        )
-        st.stop()
 
     with st.form("form_acesso"):
         password = st.text_input("Palavra-passe", type="password")
@@ -554,8 +548,8 @@ col5.metric("Alertas", f"{alertas}")
 
 st.divider()
 
-aba_dashboard, aba_cliente, aba_registar, aba_editar, aba_importar, aba_exportar = st.tabs(
-    ["📊 Dashboard", "👤 Cliente", "➕ Registar movimento", "✏️ Gestão rápida", "📥 Importar", "⬇️ Exportar"]
+aba_dashboard, aba_cliente, aba_clientes, aba_registar, aba_editar, aba_importar, aba_exportar = st.tabs(
+    ["📊 Dashboard", "👤 Cliente", "👥 Clientes", "➕ Registar movimento", "✏️ Gestão rápida", "📥 Importar", "⬇️ Exportar"]
 )
 
 # ============================================================
@@ -655,18 +649,157 @@ with aba_cliente:
             },
         )
 
+
+# ============================================================
+# GESTÃO DE CLIENTES
+# ============================================================
+
+with aba_clientes:
+    st.subheader("Gestão de clientes")
+
+    st.write(
+        "Aqui pode adicionar novos clientes sem necessidade de lançar logo uma intervenção "
+        "e pode apagar clientes da base de dados."
+    )
+
+    clientes_existentes = sorted(df_base["Cliente"].dropna().unique().tolist())
+
+    col_add, col_del = st.columns(2)
+
+    with col_add:
+        st.markdown("### Adicionar cliente")
+
+        with st.form("form_adicionar_cliente", clear_on_submit=True):
+            novo_cliente = st.text_input("Nome do cliente")
+            contacto_cliente = st.text_input("Contacto / solicitado por", placeholder="Opcional")
+            horas_iniciais = st.number_input(
+                "Pack inicial de horas",
+                min_value=0.0,
+                value=0.0,
+                step=0.25,
+                help="Pode deixar a 0 e lançar o pack mais tarde.",
+            )
+            observacoes_cliente = st.text_area("Observações", placeholder="Opcional")
+            confirmar_add = st.checkbox("Confirmo que quero adicionar este cliente")
+            add_cliente = st.form_submit_button("Adicionar cliente")
+
+            if add_cliente:
+                cliente_final = novo_cliente.strip()
+                colaborador_final = colaborador.strip() or "Não identificado"
+
+                if not cliente_final:
+                    st.error("Indique o nome do cliente.")
+                elif cliente_final.lower() in [c.lower() for c in clientes_existentes]:
+                    st.error("Este cliente já existe.")
+                elif not confirmar_add:
+                    st.error("Confirme antes de adicionar.")
+                else:
+                    max_id = pd.to_numeric(df_base["ID"], errors="coerce").max()
+                    if pd.isna(max_id):
+                        max_id = 0
+
+                    lancamento_cliente = {
+                        "ID": int(max_id) + 1,
+                        "Cliente": cliente_final,
+                        "Data": pd.to_datetime(date.today()),
+                        "Tipo": "Cliente criado" if horas_iniciais == 0 else "Compra",
+                        "Solicitada por": contacto_cliente,
+                        "Técnico": "",
+                        "Descrição da intervenção": observacoes_cliente or "Cliente criado na app",
+                        "Horas Pack": float(horas_iniciais),
+                        "Horas Usadas": 0.0,
+                        "Saldo Automático": "",
+                        "Estado": "",
+                        "Saldo Original": "",
+                        "Origem": "App colaborativa",
+                        "Registado por": colaborador_final,
+                        "Data de registo": datetime.now(),
+                    }
+
+                    if modo_google:
+                        adicionar_lancamento_google(lancamento_cliente)
+                        st.cache_data.clear()
+                        st.cache_resource.clear()
+                        st.success("Cliente adicionado ao Google Sheets.")
+                        st.rerun()
+                    else:
+                        st.session_state["df_demo"] = pd.concat(
+                            [df_base, pd.DataFrame([lancamento_cliente])],
+                            ignore_index=True,
+                        )
+                        st.success("Cliente adicionado nesta sessão de demonstração.")
+                        st.rerun()
+
+    with col_del:
+        st.markdown("### Apagar cliente")
+
+        if not clientes_existentes:
+            st.info("Ainda não existem clientes para apagar.")
+        else:
+            cliente_apagar = st.selectbox("Cliente a apagar", clientes_existentes)
+
+            movimentos_cliente = df_base[df_base["Cliente"] == cliente_apagar]
+            st.warning(
+                f"Ao apagar este cliente serão removidos {len(movimentos_cliente)} movimento(s) "
+                "associado(s), incluindo histórico de compras e intervenções."
+            )
+
+            confirmar_nome = st.text_input(
+                "Para confirmar, escreva exatamente o nome do cliente",
+                key="confirmar_nome_cliente_apagar",
+            )
+            confirmar_delete = st.checkbox("Confirmo que quero apagar este cliente e o respetivo histórico")
+
+            if st.button("Apagar cliente"):
+                if confirmar_nome.strip() != cliente_apagar:
+                    st.error("O nome escrito não corresponde ao cliente selecionado.")
+                elif not confirmar_delete:
+                    st.error("Confirme a eliminação antes de continuar.")
+                else:
+                    novo_df = df_base[df_base["Cliente"] != cliente_apagar].copy()
+
+                    if modo_google:
+                        gravar_dataframe_google(novo_df)
+                        st.cache_data.clear()
+                        st.cache_resource.clear()
+                        st.success("Cliente apagado no Google Sheets.")
+                        st.rerun()
+                    else:
+                        st.session_state["df_demo"] = novo_df
+                        st.success("Cliente apagado nesta sessão de demonstração.")
+                        st.rerun()
+
+    st.divider()
+    st.markdown("### Lista atual de clientes")
+
+    if clientes_existentes:
+        clientes_df = df_resumo[["Cliente", "Horas compradas", "Horas usadas", "Saldo", "Estado"]].copy()
+        st.dataframe(
+            clientes_df,
+            use_container_width=True,
+            hide_index=True,
+            column_config={
+                "Horas compradas": st.column_config.NumberColumn("Horas compradas", format="%.2f h"),
+                "Horas usadas": st.column_config.NumberColumn("Horas usadas", format="%.2f h"),
+                "Saldo": st.column_config.NumberColumn("Saldo", format="%.2f h"),
+            },
+        )
+    else:
+        st.info("Ainda não existem clientes registados.")
+
+
 # ============================================================
 # REGISTAR MOVIMENTO
 # ============================================================
 
 with aba_registar:
-    st.subheader("Adicionar cliente, compra de pack ou horas utilizadas")
+    st.subheader("Registar compra de pack ou horas utilizadas")
 
     if not colaborador.strip():
         st.warning("Indique o nome do colaborador na barra lateral antes de registar movimentos.")
 
     clientes_existentes = sorted(df_base["Cliente"].dropna().unique().tolist())
-    tecnicos_existentes = sorted([x for x in df_base["Técnico"].dropna().unique().tolist() if x])
+    tecnicos_existentes = TECNICOS_FIXOS
 
     with st.form("form_novo_movimento", clear_on_submit=True):
         col_a, col_b, col_c = st.columns(3)
@@ -687,10 +820,7 @@ with aba_registar:
         with col_d:
             solicitada_por = st.text_input("Solicitada por / contacto")
         with col_e:
-            tecnico_sel = st.selectbox("Técnico", [""] + tecnicos_existentes + ["Outro"])
-            tecnico = tecnico_sel
-            if tecnico_sel == "Outro":
-                tecnico = st.text_input("Indique o técnico")
+            tecnico = st.selectbox("Técnico", [""] + tecnicos_existentes)
 
         descricao = st.text_area("Descrição")
 
