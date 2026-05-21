@@ -23,3 +23,12 @@ APPS_SCRIPT_TOKEN = "Click123"
 
 11. Fazer Reboot app.
 12. Na app, ir a 📥 Importar e importar o Excel inicial.
+
+
+## Novidades desta versão
+
+- Separador **🚨 Alertas** com clientes em saldo baixo, crítico ou esgotado.
+- Campo **Email Cliente**.
+- Geração de email pronto para envio com o ponto de horas.
+
+Depois de atualizar o `AppsScript.gs`, faça nova implementação da aplicação Web no Apps Script.

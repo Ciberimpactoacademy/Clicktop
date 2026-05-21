@@ -4,11 +4,12 @@ import requests
 from pathlib import Path
 from datetime import datetime, date
 from io import BytesIO
+from urllib.parse import quote
 
 st.set_page_config(page_title="Packs de Horas", page_icon="⏱️", layout="wide")
 
 COLS = [
-    "ID","Cliente","Data","Tipo","Solicitada por","Técnico",
+    "ID","Cliente","Email Cliente","Data","Tipo","Solicitada por","Técnico",
     "Descrição da intervenção","Horas Pack","Horas Usadas",
     "Saldo Automático","Estado","Saldo Original","Origem",
     "Registado por","Data de registo"
@@ -71,7 +72,7 @@ def norm(df):
     df = df[COLS]
     df = df[df["Cliente"].notna()]
     df = df[df["Cliente"].astype(str).str.strip() != ""]
-    for c in ["Cliente","Tipo","Solicitada por","Técnico","Descrição da intervenção","Origem","Registado por"]:
+    for c in ["Cliente","Email Cliente","Tipo","Solicitada por","Técnico","Descrição da intervenção","Origem","Registado por"]:
         df[c] = df[c].fillna("").astype(str).str.strip()
     for c in ["Horas Pack","Horas Usadas","Saldo Automático","Saldo Original"]:
         df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
@@ -88,10 +89,19 @@ def saldos(df):
     df["Saldo Automático"] = df.groupby("Cliente")["Horas Pack"].cumsum() - df.groupby("Cliente")["Horas Usadas"].cumsum()
     return df
 
+def email_por_cliente(df):
+    if df.empty or "Email Cliente" not in df.columns:
+        return {}
+    temp = df[df["Email Cliente"].fillna("").astype(str).str.strip() != ""].copy()
+    if temp.empty:
+        return {}
+    temp = temp.sort_values(["Cliente", "Data", "ID"], na_position="last")
+    return temp.groupby("Cliente")["Email Cliente"].last().to_dict()
+
 def resumo(df, critico, baixo):
     df = saldos(df)
     if df.empty:
-        return pd.DataFrame(columns=["Cliente","Horas compradas","Horas usadas","Saldo","Última intervenção","N.º intervenções","Estado","Próxima ação"])
+        return pd.DataFrame(columns=["Cliente","Email Cliente","Horas compradas","Horas usadas","Saldo","Última intervenção","N.º intervenções","Estado","Próxima ação"])
     r = df.groupby("Cliente", as_index=False).agg(
         **{"Horas compradas":("Horas Pack","sum"), "Horas usadas":("Horas Usadas","sum"), "Última intervenção":("Data","max")}
     )
@@ -99,6 +109,7 @@ def resumo(df, critico, baixo):
     r = r.merge(n, on="Cliente", how="left")
     r["N.º intervenções"] = r["N.º intervenções"].fillna(0).astype(int)
     r["Saldo"] = r["Horas compradas"] - r["Horas usadas"]
+    r["Email Cliente"] = r["Cliente"].map(email_por_cliente(df)).fillna("")
 
     def estado(s):
         if s <= 0: return "ESGOTADO"
@@ -171,6 +182,29 @@ def export_excel(df, r):
     out.seek(0)
     return out.getvalue()
 
+def criar_mailto(cliente, email, saldo, compradas, usadas, estado, ultima=None):
+    assunto = f"Saldo de pack de horas - {cliente}"
+    ultima_txt = ""
+    if ultima is not None and pd.notna(ultima):
+        ultima_txt = pd.to_datetime(ultima).strftime("%d/%m/%Y")
+    corpo = f"""Olá,
+
+Partilhamos o ponto de situação do pack de horas associado à vossa empresa:
+
+Cliente: {cliente}
+Horas compradas: {compradas:.2f} h
+Horas utilizadas: {usadas:.2f} h
+Saldo disponível: {saldo:.2f} h
+Estado: {estado}
+Última intervenção registada: {ultima_txt}
+
+Caso pretendam reforçar o pack de horas ou esclarecer algum detalhe, estamos disponíveis.
+
+Com os melhores cumprimentos,
+Clickstop
+"""
+    return f"mailto:{quote(email)}?subject={quote(assunto)}&body={quote(corpo)}"
+
 st.title("⏱️ Gestão de Packs de Horas")
 st.caption("Versão sem JSON: ligação à Google Sheet através de Google Apps Script.")
 
@@ -205,15 +239,16 @@ except Exception as e:
 
 df = saldos(df)
 r = resumo(df, critico, baixo)
+alertas_df = r[r["Estado"] != "OK"].copy() if not r.empty else r.copy()
 
 c1,c2,c3,c4,c5 = st.columns(5)
 c1.metric("Clientes", r["Cliente"].nunique() if not r.empty else 0)
 c2.metric("Horas compradas", f"{r['Horas compradas'].sum():.1f} h" if not r.empty else "0 h")
 c3.metric("Horas usadas", f"{r['Horas usadas'].sum():.1f} h" if not r.empty else "0 h")
 c4.metric("Saldo total", f"{r['Saldo'].sum():.1f} h" if not r.empty else "0 h")
-c5.metric("Alertas", int((r["Estado"]!="OK").sum()) if not r.empty else 0)
+c5.metric("Clientes em alerta", len(alertas_df))
 
-tabs = st.tabs(["📊 Dashboard","👤 Cliente","👥 Clientes","➕ Registar movimento","🧾 Movimentos","📥 Importar","⬇️ Exportar"])
+tabs = st.tabs(["📊 Dashboard","🚨 Alertas","👤 Cliente","👥 Clientes","➕ Registar movimento","🧾 Movimentos","📥 Importar","⬇️ Exportar"])
 
 with tabs[0]:
     st.subheader("Resumo por cliente")
@@ -230,6 +265,44 @@ with tabs[0]:
         st.bar_chart(r.sort_values("Saldo").head(15).set_index("Cliente")[["Saldo"]])
 
 with tabs[1]:
+    st.subheader("Clientes em alerta")
+    st.caption("Clientes com saldo baixo, crítico ou esgotado.")
+    if alertas_df.empty:
+        st.success("Não existem clientes em alerta.")
+    else:
+        st.dataframe(
+            alertas_df[["Cliente","Email Cliente","Horas compradas","Horas usadas","Saldo","Estado","Próxima ação"]],
+            use_container_width=True,
+            hide_index=True
+        )
+        st.divider()
+        st.markdown("### Enviar ponto de horas por email")
+        cliente_alerta = st.selectbox("Selecionar cliente em alerta", alertas_df["Cliente"].tolist())
+        linha = alertas_df[alertas_df["Cliente"] == cliente_alerta].iloc[0]
+        email_para = st.text_input("Email do cliente", value=str(linha.get("Email Cliente", "")))
+        st.info(
+            f"Cliente: {cliente_alerta}\n\n"
+            f"Horas compradas: {linha['Horas compradas']:.2f} h\n\n"
+            f"Horas usadas: {linha['Horas usadas']:.2f} h\n\n"
+            f"Saldo: {linha['Saldo']:.2f} h\n\n"
+            f"Estado: {linha['Estado']}"
+        )
+        if email_para.strip():
+            link = criar_mailto(
+                cliente_alerta,
+                email_para.strip(),
+                linha["Saldo"],
+                linha["Horas compradas"],
+                linha["Horas usadas"],
+                linha["Estado"],
+                linha["Última intervenção"]
+            )
+            st.markdown(f"[📧 Abrir email pronto para enviar]({link})")
+            st.caption("O link abre o seu programa de email com a mensagem preenchida. Depois só precisa rever e enviar.")
+        else:
+            st.warning("Indique o email do cliente para gerar o email.")
+
+with tabs[2]:
     st.subheader("Ficha do cliente")
     clientes = sorted(df["Cliente"].dropna().unique().tolist())
     if not clientes:
@@ -237,8 +310,16 @@ with tabs[1]:
     else:
         cl = st.selectbox("Selecionar cliente", clientes)
         st.dataframe(df[df["Cliente"] == cl], use_container_width=True, hide_index=True)
+        linha = r[r["Cliente"] == cl]
+        if not linha.empty:
+            l = linha.iloc[0]
+            st.markdown("### Enviar ponto de horas")
+            email_para = st.text_input("Email do cliente", value=str(l.get("Email Cliente", "")), key="email_ficha")
+            if email_para.strip():
+                link = criar_mailto(cl, email_para.strip(), l["Saldo"], l["Horas compradas"], l["Horas usadas"], l["Estado"], l["Última intervenção"])
+                st.markdown(f"[📧 Abrir email pronto para enviar]({link})")
 
-with tabs[2]:
+with tabs[3]:
     st.subheader("Gestão de clientes")
     clientes = sorted(df["Cliente"].dropna().unique().tolist())
     a,b = st.columns(2)
@@ -247,6 +328,7 @@ with tabs[2]:
         st.markdown("### Adicionar cliente")
         with st.form("add_cliente", clear_on_submit=True):
             novo = st.text_input("Nome do cliente")
+            email_cliente = st.text_input("Email do cliente")
             contacto = st.text_input("Contacto / solicitado por")
             horas = st.number_input("Pack inicial de horas", min_value=0.0, value=0.0, step=0.25)
             obs = st.text_area("Observações")
@@ -263,7 +345,7 @@ with tabs[2]:
                 max_id = pd.to_numeric(df["ID"], errors="coerce").max()
                 if pd.isna(max_id): max_id = 0
                 row = {
-                    "ID": int(max_id)+1, "Cliente": novo.strip(), "Data": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+                    "ID": int(max_id)+1, "Cliente": novo.strip(), "Email Cliente": email_cliente.strip(), "Data": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
                     "Tipo": "Cliente criado" if horas == 0 else "Compra", "Solicitada por": contacto, "Técnico": "",
                     "Descrição da intervenção": obs or "Cliente criado na app", "Horas Pack": float(horas), "Horas Usadas": 0.0,
                     "Saldo Automático": "", "Estado": "", "Saldo Original": "", "Origem": "App",
@@ -295,7 +377,7 @@ with tabs[2]:
                     st.success("Cliente apagado.")
                     st.rerun()
 
-with tabs[3]:
+with tabs[4]:
     st.subheader("Registar movimento")
     if not user.strip():
         st.warning("Indique o nome do colaborador na barra lateral.")
@@ -306,6 +388,9 @@ with tabs[3]:
         novo_cliente = ""
         if cliente_sel == "Novo cliente":
             novo_cliente = st.text_input("Nome do novo cliente")
+            email_movimento = st.text_input("Email do novo cliente")
+        else:
+            email_movimento = email_por_cliente(df).get(cliente_sel, "")
         data_mov = c2.date_input("Data", value=date.today(), format="DD/MM/YYYY")
         tipo = c3.selectbox("Tipo", TIPOS)
         solicitada = st.text_input("Solicitada por / contacto")
@@ -330,7 +415,7 @@ with tabs[3]:
             max_id = pd.to_numeric(df["ID"], errors="coerce").max()
             if pd.isna(max_id): max_id = 0
             row = {
-                "ID": int(max_id)+1, "Cliente": cliente_final, "Data": pd.to_datetime(data_mov).strftime("%d/%m/%Y"),
+                "ID": int(max_id)+1, "Cliente": cliente_final, "Email Cliente": email_movimento, "Data": pd.to_datetime(data_mov).strftime("%d/%m/%Y"),
                 "Tipo": tipo, "Solicitada por": solicitada, "Técnico": tecnico, "Descrição da intervenção": desc,
                 "Horas Pack": float(pack), "Horas Usadas": float(usadas), "Saldo Automático": "",
                 "Estado": "", "Saldo Original": "", "Origem": "App", "Registado por": user.strip(),
@@ -341,7 +426,7 @@ with tabs[3]:
             st.success("Movimento guardado.")
             st.rerun()
 
-with tabs[4]:
+with tabs[5]:
     st.subheader("Movimentos")
     if df.empty:
         st.info("Sem movimentos.")
@@ -365,7 +450,7 @@ with tabs[4]:
                 st.success("Movimento apagado.")
                 st.rerun()
 
-with tabs[5]:
+with tabs[6]:
     st.subheader("Importar Excel inicial para Google Sheet")
     dados = excel_inicial()
     st.write(f"Movimentos encontrados no Excel: **{len(dados)}**")
@@ -378,7 +463,7 @@ with tabs[5]:
                 st.success("Dados importados.")
                 st.rerun()
 
-with tabs[6]:
+with tabs[7]:
     st.subheader("Exportar Excel atualizado")
     st.download_button(
         "Descarregar Excel",

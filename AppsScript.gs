@@ -2,7 +2,7 @@ const SHEET_NAME = "Base_Lancamentos";
 const DEFAULT_TOKEN = "Click123";
 
 const HEADERS = [
-  "ID","Cliente","Data","Tipo","Solicitada por","Técnico",
+  "ID","Cliente","Email Cliente","Data","Tipo","Solicitada por","Técnico",
   "Descrição da intervenção","Horas Pack","Horas Usadas",
   "Saldo Automático","Estado","Saldo Original","Origem",
   "Registado por","Data de registo"
