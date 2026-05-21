@@ -1,1097 +1,389 @@
 import streamlit as st
 import pandas as pd
+import requests
 from pathlib import Path
 from datetime import datetime, date
 from io import BytesIO
-import json
 
-try:
-    import gspread
-    from google.oauth2.service_account import Credentials
-except Exception:
-    gspread = None
-    Credentials = None
+st.set_page_config(page_title="Packs de Horas", page_icon="⏱️", layout="wide")
 
-
-st.set_page_config(
-    page_title="Packs de Horas | Gestão Colaborativa",
-    page_icon="⏱️",
-    layout="wide",
-)
-
-# ============================================================
-# CONFIGURAÇÃO
-# ============================================================
-
-COLUNAS_BASE = [
-    "ID",
-    "Cliente",
-    "Data",
-    "Tipo",
-    "Solicitada por",
-    "Técnico",
-    "Descrição da intervenção",
-    "Horas Pack",
-    "Horas Usadas",
-    "Saldo Automático",
-    "Estado",
-    "Saldo Original",
-    "Origem",
-    "Registado por",
-    "Data de registo",
+COLS = [
+    "ID","Cliente","Data","Tipo","Solicitada por","Técnico",
+    "Descrição da intervenção","Horas Pack","Horas Usadas",
+    "Saldo Automático","Estado","Saldo Original","Origem",
+    "Registado por","Data de registo"
 ]
+TECNICOS = ["Clicktop", "Ivan Lopes", "Luis Lopes", "Miguel Carvalho", "Rodrigo Cândido"]
+TIPOS = ["Intervenção", "Compra", "Ajuste", "Cliente criado"]
 
-TIPOS_MOVIMENTO = ["Intervenção", "Compra", "Ajuste", "Cliente criado"]
-TECNICOS_FIXOS = ["Clicktop", "Ivan Lopes", "Luis Lopes", "Miguel Carvalho", "Rodrigo Cândido"]
-NOME_FOLHA = "Base_Lancamentos"
+st.markdown("""
+<style>
+.block-container{padding-top:1.4rem}
+h1{color:#061B2B}
+div.stButton>button:first-child{background:#1482FF;color:white;border-radius:12px;border:0;font-weight:700}
+div.stDownloadButton>button:first-child{background:#061B2B;color:white;border-radius:12px;border:0;font-weight:700}
+</style>
+""", unsafe_allow_html=True)
 
-# ============================================================
-# ESTILO
-# ============================================================
-
-st.markdown(
-    """
-    <style>
-    :root {
-        --ci-blue: #1482FF;
-        --ci-dark: #061B2B;
-        --ci-turquoise: #12E9CA;
-        --ci-light: #F5FAFF;
-    }
-    .block-container {
-        padding-top: 1.5rem;
-    }
-    .ci-title {
-        color: var(--ci-dark);
-        font-weight: 850;
-        letter-spacing: -0.03em;
-    }
-    .ci-card {
-        padding: 1rem 1.2rem;
-        border-radius: 18px;
-        background: linear-gradient(135deg, #F5FAFF 0%, #FFFFFF 100%);
-        border: 1px solid #E3EEF8;
-        box-shadow: 0 8px 24px rgba(6, 27, 43, 0.06);
-    }
-    .status-ok {
-        color: #047857;
-        font-weight: 800;
-    }
-    .status-baixo {
-        color: #D97706;
-        font-weight: 800;
-    }
-    .status-critico {
-        color: #B45309;
-        font-weight: 800;
-    }
-    .status-esgotado {
-        color: #B91C1C;
-        font-weight: 800;
-    }
-    div.stButton > button:first-child {
-        background-color: #1482FF;
-        color: white;
-        border-radius: 12px;
-        border: none;
-        padding: 0.55rem 1rem;
-        font-weight: 700;
-    }
-    div.stDownloadButton > button:first-child {
-        background-color: #061B2B;
-        color: white;
-        border-radius: 12px;
-        border: none;
-        padding: 0.55rem 1rem;
-        font-weight: 700;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-
-
-# ============================================================
-# ACESSO À APP
-# ============================================================
-
-def obter_app_password():
-    """
-    Palavra-passe interna da app.
-    Deve ser colocada nos Secrets do Streamlit:
-    APP_PASSWORD = "a-sua-palavra-passe"
-    """
+def secret(name, default=""):
     try:
-        return st.secrets.get("APP_PASSWORD", "Click123")
+        return st.secrets.get(name, default)
     except Exception:
-        return ""
+        return default
 
+def login():
+    if "ok_login" not in st.session_state:
+        st.session_state.ok_login = False
+    if st.session_state.ok_login:
+        return
 
-def verificar_acesso():
-    if "acesso_autorizado" not in st.session_state:
-        st.session_state["acesso_autorizado"] = False
-
-    if st.session_state["acesso_autorizado"]:
-        return True
-
-    st.markdown("<h1 class='ci-title'>🔐 Acesso reservado</h1>", unsafe_allow_html=True)
-    st.write("Introduza a palavra-passe para aceder à gestão de packs de horas.")
-
-    password_configurada = obter_app_password()
-
-    with st.form("form_acesso"):
-        password = st.text_input("Palavra-passe", type="password")
+    st.title("🔐 Acesso reservado")
+    with st.form("login"):
+        pw = st.text_input("Palavra-passe", type="password")
         entrar = st.form_submit_button("Entrar")
-
     if entrar:
-        if password == password_configurada:
-            st.session_state["acesso_autorizado"] = True
+        if pw == secret("APP_PASSWORD", "Click123"):
+            st.session_state.ok_login = True
             st.rerun()
         else:
             st.error("Palavra-passe incorreta.")
-
     st.stop()
 
+login()
 
-verificar_acesso()
-
-# ============================================================
-# FUNÇÕES GERAIS
-# ============================================================
-
-def converter_data(valor):
-    if pd.isna(valor) or valor == "":
+def data_pt(v):
+    if pd.isna(v) or v == "":
         return pd.NaT
-    if isinstance(valor, (pd.Timestamp, datetime)):
-        return pd.to_datetime(valor)
-    if isinstance(valor, date):
-        return pd.to_datetime(valor)
-    if isinstance(valor, (int, float)):
-        return pd.to_datetime("1899-12-30") + pd.to_timedelta(int(valor), unit="D")
-    return pd.to_datetime(valor, errors="coerce", dayfirst=True)
+    if isinstance(v, (pd.Timestamp, datetime, date)):
+        return pd.to_datetime(v)
+    if isinstance(v, (int, float)):
+        return pd.to_datetime("1899-12-30") + pd.to_timedelta(int(v), unit="D")
+    return pd.to_datetime(v, errors="coerce", dayfirst=True)
 
-
-def normalizar_base(df: pd.DataFrame) -> pd.DataFrame:
+def norm(df):
     df = df.copy()
-
     if df.empty:
-        return pd.DataFrame(columns=COLUNAS_BASE)
-
+        return pd.DataFrame(columns=COLS)
     df.columns = [str(c).strip() for c in df.columns]
-
-    for coluna in COLUNAS_BASE:
-        if coluna not in df.columns:
-            df[coluna] = None
-
-    df = df[COLUNAS_BASE]
-
+    for c in COLS:
+        if c not in df.columns:
+            df[c] = None
+    df = df[COLS]
     df = df[df["Cliente"].notna()]
     df = df[df["Cliente"].astype(str).str.strip() != ""]
-
-    df["Cliente"] = df["Cliente"].astype(str).str.strip()
-    df["Tipo"] = df["Tipo"].fillna("").astype(str).str.strip()
-    df["Técnico"] = df["Técnico"].fillna("").astype(str).str.strip()
-    df["Descrição da intervenção"] = df["Descrição da intervenção"].fillna("").astype(str).str.strip()
-    df["Solicitada por"] = df["Solicitada por"].fillna("").astype(str).str.strip()
-    df["Origem"] = df["Origem"].fillna("").astype(str).str.strip()
-    df["Registado por"] = df["Registado por"].fillna("").astype(str).str.strip()
-
-    df["Horas Pack"] = pd.to_numeric(df["Horas Pack"], errors="coerce").fillna(0.0)
-    df["Horas Usadas"] = pd.to_numeric(df["Horas Usadas"], errors="coerce").fillna(0.0)
-    df["Saldo Original"] = pd.to_numeric(df["Saldo Original"], errors="coerce")
-    df["Saldo Automático"] = pd.to_numeric(df["Saldo Automático"], errors="coerce")
-
-    df["Data"] = df["Data"].apply(converter_data)
-    df["Data de registo"] = pd.to_datetime(df["Data de registo"], errors="coerce", dayfirst=True)
-
+    for c in ["Cliente","Tipo","Solicitada por","Técnico","Descrição da intervenção","Origem","Registado por"]:
+        df[c] = df[c].fillna("").astype(str).str.strip()
+    for c in ["Horas Pack","Horas Usadas","Saldo Automático","Saldo Original"]:
+        df[c] = pd.to_numeric(df[c], errors="coerce").fillna(0.0)
     df["ID"] = pd.to_numeric(df["ID"], errors="coerce")
-    df = df.sort_values(["Cliente", "Data", "ID"], na_position="last").reset_index(drop=True)
+    df["Data"] = df["Data"].apply(data_pt)
+    df["Data de registo"] = pd.to_datetime(df["Data de registo"], errors="coerce", dayfirst=True)
+    return df.sort_values(["Cliente","Data","ID"], na_position="last").reset_index(drop=True)
 
-    return df
-
-
-def recalcular_saldos(df: pd.DataFrame) -> pd.DataFrame:
-    df = normalizar_base(df)
+def saldos(df):
+    df = norm(df)
     if df.empty:
         return df
-    df = df.sort_values(["Cliente", "Data", "ID"], na_position="last").reset_index(drop=True)
-    df["Saldo Automático"] = (
-        df.groupby("Cliente")["Horas Pack"].cumsum()
-        - df.groupby("Cliente")["Horas Usadas"].cumsum()
-    )
+    df = df.sort_values(["Cliente","Data","ID"], na_position="last").reset_index(drop=True)
+    df["Saldo Automático"] = df.groupby("Cliente")["Horas Pack"].cumsum() - df.groupby("Cliente")["Horas Usadas"].cumsum()
     return df
 
-
-def calcular_estado(saldo: float, limite_critico: float, limite_baixo: float) -> str:
-    if saldo <= 0:
-        return "ESGOTADO"
-    if saldo <= limite_critico:
-        return "SALDO CRÍTICO"
-    if saldo <= limite_baixo:
-        return "SALDO BAIXO"
-    return "OK"
-
-
-def calcular_acao(saldo: float, limite_critico: float, limite_baixo: float) -> str:
-    if saldo <= 0:
-        return "Contactar para renovação urgente"
-    if saldo <= limite_critico:
-        return "Contactar antes de nova intervenção"
-    if saldo <= limite_baixo:
-        return "Sugerir reforço de pack"
-    return "Sem ação imediata"
-
-
-def calcular_resumo(df: pd.DataFrame, limite_critico: float, limite_baixo: float) -> pd.DataFrame:
-    df = recalcular_saldos(df)
-
+def resumo(df, critico, baixo):
+    df = saldos(df)
     if df.empty:
-        return pd.DataFrame(
-            columns=[
-                "Cliente",
-                "Horas compradas",
-                "Horas usadas",
-                "Saldo",
-                "Última intervenção",
-                "N.º intervenções",
-                "Estado",
-                "Próxima ação",
-            ]
-        )
-
-    resumo = (
-        df.groupby("Cliente", as_index=False)
-        .agg(
-            **{
-                "Horas compradas": ("Horas Pack", "sum"),
-                "Horas usadas": ("Horas Usadas", "sum"),
-                "Última intervenção": ("Data", "max"),
-            }
-        )
+        return pd.DataFrame(columns=["Cliente","Horas compradas","Horas usadas","Saldo","Última intervenção","N.º intervenções","Estado","Próxima ação"])
+    r = df.groupby("Cliente", as_index=False).agg(
+        **{"Horas compradas":("Horas Pack","sum"), "Horas usadas":("Horas Usadas","sum"), "Última intervenção":("Data","max")}
     )
+    n = df[df["Tipo"].str.lower().str.contains("interven", na=False)].groupby("Cliente").size().rename("N.º intervenções").reset_index()
+    r = r.merge(n, on="Cliente", how="left")
+    r["N.º intervenções"] = r["N.º intervenções"].fillna(0).astype(int)
+    r["Saldo"] = r["Horas compradas"] - r["Horas usadas"]
 
-    intervencoes = (
-        df[df["Tipo"].str.lower().str.contains("interven", na=False)]
-        .groupby("Cliente")
-        .size()
-        .rename("N.º intervenções")
-        .reset_index()
-    )
+    def estado(s):
+        if s <= 0: return "ESGOTADO"
+        if s <= critico: return "SALDO CRÍTICO"
+        if s <= baixo: return "SALDO BAIXO"
+        return "OK"
 
-    resumo = resumo.merge(intervencoes, on="Cliente", how="left")
-    resumo["N.º intervenções"] = resumo["N.º intervenções"].fillna(0).astype(int)
-    resumo["Saldo"] = resumo["Horas compradas"] - resumo["Horas usadas"]
-    resumo["Estado"] = resumo["Saldo"].apply(lambda s: calcular_estado(s, limite_critico, limite_baixo))
-    resumo["Próxima ação"] = resumo["Saldo"].apply(lambda s: calcular_acao(s, limite_critico, limite_baixo))
+    def acao(s):
+        if s <= 0: return "Contactar para renovação urgente"
+        if s <= critico: return "Contactar antes de nova intervenção"
+        if s <= baixo: return "Sugerir reforço de pack"
+        return "Sem ação imediata"
 
-    ordem = {"ESGOTADO": 0, "SALDO CRÍTICO": 1, "SALDO BAIXO": 2, "OK": 3}
-    resumo["ordem"] = resumo["Estado"].map(ordem).fillna(9)
-    resumo = resumo.sort_values(["ordem", "Saldo", "Cliente"]).drop(columns=["ordem"]).reset_index(drop=True)
+    r["Estado"] = r["Saldo"].apply(estado)
+    r["Próxima ação"] = r["Saldo"].apply(acao)
+    ordem = {"ESGOTADO":0, "SALDO CRÍTICO":1, "SALDO BAIXO":2, "OK":3}
+    r["ordem"] = r["Estado"].map(ordem)
+    return r.sort_values(["ordem","Saldo","Cliente"]).drop(columns=["ordem"]).reset_index(drop=True)
 
-    return resumo
-
-
-def formatar_estado(estado: str):
-    if estado == "OK":
-        return "status-ok"
-    if estado == "SALDO BAIXO":
-        return "status-baixo"
-    if estado == "SALDO CRÍTICO":
-        return "status-critico"
-    if estado == "ESGOTADO":
-        return "status-esgotado"
-    return ""
-
-
-def dataframe_para_linhas_google(df: pd.DataFrame):
-    df = df.copy()
-    for col in ["Data", "Data de registo"]:
-        if col in df.columns:
-            df[col] = pd.to_datetime(df[col], errors="coerce").dt.strftime("%d/%m/%Y")
-            df[col] = df[col].replace("NaT", "")
-    df = df.fillna("")
-    return [COLUNAS_BASE] + df[COLUNAS_BASE].astype(str).values.tolist()
-
-
-def exportar_excel(df_lancamentos: pd.DataFrame, df_resumo: pd.DataFrame) -> bytes:
-    output = BytesIO()
-    with pd.ExcelWriter(output, engine="xlsxwriter", datetime_format="dd/mm/yyyy", date_format="dd/mm/yyyy") as writer:
-        df_resumo.to_excel(writer, sheet_name="Dashboard", index=False)
-        df_lancamentos.to_excel(writer, sheet_name="Base_Lancamentos", index=False)
-
-        workbook = writer.book
-        header_fmt = workbook.add_format(
-            {
-                "bold": True,
-                "font_color": "white",
-                "bg_color": "#061B2B",
-                "border": 1,
-                "align": "center",
-                "valign": "vcenter",
-            }
-        )
-        number_fmt = workbook.add_format({"num_format": "0.00"})
-        date_fmt = workbook.add_format({"num_format": "dd/mm/yyyy"})
-
-        for sheet_name, df_sheet in {"Dashboard": df_resumo, "Base_Lancamentos": df_lancamentos}.items():
-            ws = writer.sheets[sheet_name]
-            for col_num, value in enumerate(df_sheet.columns):
-                ws.write(0, col_num, value, header_fmt)
-                largura = min(max(len(str(value)) + 3, 12), 38)
-                ws.set_column(col_num, col_num, largura)
-            ws.freeze_panes(1, 0)
-            ws.autofilter(0, 0, max(len(df_sheet), 1), max(len(df_sheet.columns) - 1, 0))
-
-        dash = writer.sheets["Dashboard"]
-        colunas_dash = list(df_resumo.columns)
-        for nome_coluna in ["Horas compradas", "Horas usadas", "Saldo"]:
-            if nome_coluna in colunas_dash:
-                idx = colunas_dash.index(nome_coluna)
-                dash.set_column(idx, idx, 16, number_fmt)
-        if "Última intervenção" in colunas_dash:
-            idx = colunas_dash.index("Última intervenção")
-            dash.set_column(idx, idx, 18, date_fmt)
-
-        base = writer.sheets["Base_Lancamentos"]
-        colunas_base = list(df_lancamentos.columns)
-        for nome_coluna in ["Horas Pack", "Horas Usadas", "Saldo Automático", "Saldo Original"]:
-            if nome_coluna in colunas_base:
-                idx = colunas_base.index(nome_coluna)
-                base.set_column(idx, idx, 15, number_fmt)
-        for nome_coluna in ["Data", "Data de registo"]:
-            if nome_coluna in colunas_base:
-                idx = colunas_base.index(nome_coluna)
-                base.set_column(idx, idx, 15, date_fmt)
-
-    output.seek(0)
-    return output.getvalue()
-
+def rows_from_df(df):
+    df = saldos(df).copy()
+    for c in ["Data","Data de registo"]:
+        df[c] = pd.to_datetime(df[c], errors="coerce").dt.strftime("%d/%m/%Y %H:%M:%S").replace("NaT","")
+    return df.fillna("").to_dict(orient="records")
 
 @st.cache_data(show_spinner=False)
-def carregar_excel_demo():
-    ficheiro = Path(__file__).with_name("PACKS_DE_HORAS_AUTOMATIZADO.xlsx")
-    if not ficheiro.exists():
-        return pd.DataFrame(columns=COLUNAS_BASE)
+def excel_inicial():
+    f = Path(__file__).with_name("PACKS_DE_HORAS_AUTOMATIZADO.xlsx")
+    if not f.exists():
+        return pd.DataFrame(columns=COLS)
     try:
-        # O ficheiro automatizado anterior tem o cabeçalho na linha 4.
-        df = pd.read_excel(ficheiro, sheet_name="Base_Lancamentos", header=3)
+        return norm(pd.read_excel(f, sheet_name="Base_Lancamentos", header=3))
     except Exception:
         try:
-            df = pd.read_excel(ficheiro, sheet_name="Base_Lancamentos")
+            return norm(pd.read_excel(f, sheet_name="Base_Lancamentos"))
         except Exception:
-            return pd.DataFrame(columns=COLUNAS_BASE)
-    return normalizar_base(df)
+            return pd.DataFrame(columns=COLS)
 
+def backend_ok():
+    return bool(secret("APPS_SCRIPT_WEBAPP_URL",""))
 
-# ============================================================
-# GOOGLE SHEETS
-# ============================================================
+def call(action, **payload):
+    url = secret("APPS_SCRIPT_WEBAPP_URL","")
+    token = secret("APPS_SCRIPT_TOKEN","Click123")
+    if not url:
+        raise RuntimeError("APPS_SCRIPT_WEBAPP_URL não configurado.")
+    body = {"action":action, "token":token}
+    body.update(payload)
+    res = requests.post(url, json=body, timeout=30)
+    res.raise_for_status()
+    data = res.json()
+    if not data.get("ok"):
+        raise RuntimeError(data.get("error", "Erro no Apps Script."))
+    return data
 
-def obter_secrets():
-    try:
-        return st.secrets
-    except Exception:
-        return {}
+def ler():
+    return norm(pd.DataFrame(call("read").get("rows", [])))
 
+def append(row):
+    call("append", row=row)
 
-def google_configurado():
-    secrets = obter_secrets()
-    try:
-        tem_sheet = bool(secrets.get("GOOGLE_SHEET_ID", ""))
-        tem_conta = "gcp_service_account" in secrets
-        return bool(tem_sheet and tem_conta and gspread is not None and Credentials is not None)
-    except Exception:
-        return False
+def replace_all(df):
+    call("replace_all", rows=rows_from_df(df))
 
+def export_excel(df, r):
+    out = BytesIO()
+    with pd.ExcelWriter(out, engine="xlsxwriter") as writer:
+        r.to_excel(writer, sheet_name="Dashboard", index=False)
+        df.to_excel(writer, sheet_name="Base_Lancamentos", index=False)
+    out.seek(0)
+    return out.getvalue()
 
-@st.cache_resource(show_spinner=False)
-def obter_worksheet_google():
-    secrets = obter_secrets()
-    sheet_id = secrets.get("GOOGLE_SHEET_ID", "")
-
-    service_account_info = dict(secrets["gcp_service_account"])
-
-    # Evita erro quando a private_key é colada com \n no Streamlit.
-    if "private_key" in service_account_info:
-        service_account_info["private_key"] = service_account_info["private_key"].replace("\\n", "\n")
-
-    scopes = [
-        "https://www.googleapis.com/auth/spreadsheets",
-        "https://www.googleapis.com/auth/drive",
-    ]
-
-    credentials = Credentials.from_service_account_info(service_account_info, scopes=scopes)
-    client = gspread.authorize(credentials)
-    spreadsheet = client.open_by_key(sheet_id)
-
-    try:
-        worksheet = spreadsheet.worksheet(NOME_FOLHA)
-    except gspread.WorksheetNotFound:
-        worksheet = spreadsheet.add_worksheet(title=NOME_FOLHA, rows=1000, cols=len(COLUNAS_BASE) + 5)
-        worksheet.update("A1", [COLUNAS_BASE])
-
-    valores = worksheet.get_all_values()
-    if not valores:
-        worksheet.update("A1", [COLUNAS_BASE])
-    elif valores[0] != COLUNAS_BASE:
-        # Garante que a folha tem todas as colunas necessárias sem apagar dados existentes.
-        cabecalhos = valores[0]
-        novas_colunas = [c for c in COLUNAS_BASE if c not in cabecalhos]
-        if novas_colunas:
-            novo_cabecalho = cabecalhos + novas_colunas
-            worksheet.update("A1", [novo_cabecalho])
-
-    return worksheet
-
-
-def ler_google_sheets() -> pd.DataFrame:
-    worksheet = obter_worksheet_google()
-    valores = worksheet.get_all_values()
-
-    if not valores or len(valores) <= 1:
-        return pd.DataFrame(columns=COLUNAS_BASE)
-
-    cabecalhos = valores[0]
-    linhas = valores[1:]
-    df = pd.DataFrame(linhas, columns=cabecalhos)
-
-    return normalizar_base(df)
-
-
-def gravar_dataframe_google(df: pd.DataFrame):
-    worksheet = obter_worksheet_google()
-    df = recalcular_saldos(df)
-    linhas = dataframe_para_linhas_google(df)
-    worksheet.clear()
-    worksheet.update("A1", linhas)
-
-
-def adicionar_lancamento_google(lancamento: dict):
-    worksheet = obter_worksheet_google()
-    linha = []
-    for coluna in COLUNAS_BASE:
-        valor = lancamento.get(coluna, "")
-        if isinstance(valor, (pd.Timestamp, datetime)):
-            valor = valor.strftime("%d/%m/%Y")
-        elif isinstance(valor, date):
-            valor = valor.strftime("%d/%m/%Y")
-        elif pd.isna(valor):
-            valor = ""
-        linha.append(str(valor))
-    worksheet.append_row(linha, value_input_option="USER_ENTERED")
-
-
-# ============================================================
-# INTERFACE
-# ============================================================
-
-st.markdown("<h1 class='ci-title'>⏱️ Gestão Colaborativa de Packs de Horas</h1>", unsafe_allow_html=True)
-st.caption("Aplicação para colaboradores registarem clientes, compras de packs, intervenções e horas utilizadas.")
+st.title("⏱️ Gestão de Packs de Horas")
+st.caption("Versão sem JSON: ligação à Google Sheet através de Google Apps Script.")
 
 with st.sidebar:
     st.header("⚙️ Configuração")
-
-    if st.button("Terminar sessão"):
-        st.session_state["acesso_autorizado"] = False
-        st.rerun()
-
-    modo_google = google_configurado()
-
-    if modo_google:
-        st.success("Modo colaborativo ativo: Google Sheets")
+    modo = backend_ok()
+    if modo:
+        st.success("Modo colaborativo ativo")
     else:
-        st.warning("Modo demonstração: os dados não ficam gravados permanentemente.")
-        st.caption("Para colaboração real, configure o Google Sheets nos Secrets do Streamlit.")
-
-    colaborador = st.text_input("Nome do colaborador", placeholder="Ex.: Ana, Miguel, Cátia")
-
-    limite_critico = st.number_input("Limite saldo crítico", min_value=0.0, value=1.0, step=0.5)
-    limite_baixo = st.number_input("Limite saldo baixo", min_value=0.0, value=2.0, step=0.5)
-
-    st.divider()
-
-    if st.button("🔄 Atualizar dados"):
+        st.warning("Modo demonstração")
+    user = st.text_input("Nome do colaborador")
+    critico = st.number_input("Limite saldo crítico", min_value=0.0, value=1.0, step=0.5)
+    baixo = st.number_input("Limite saldo baixo", min_value=0.0, value=2.0, step=0.5)
+    if st.button("🔄 Atualizar"):
         st.cache_data.clear()
-        st.cache_resource.clear()
+        st.rerun()
+    if st.button("Terminar sessão"):
+        st.session_state.ok_login = False
         st.rerun()
 
-# Carregar dados
-if modo_google:
-    try:
-        df_base = ler_google_sheets()
-    except Exception as e:
-        st.error("Não foi possível ligar ao Google Sheets. Confirme os Secrets e se a folha foi partilhada com o e-mail da service account.")
-        st.exception(e)
-        st.stop()
-else:
-    if "df_demo" not in st.session_state:
-        st.session_state["df_demo"] = carregar_excel_demo()
-    df_base = st.session_state["df_demo"]
+try:
+    if modo:
+        df = ler()
+    else:
+        if "demo" not in st.session_state:
+            st.session_state.demo = excel_inicial()
+        df = st.session_state.demo
+except Exception as e:
+    st.error("Não foi possível carregar os dados.")
+    st.exception(e)
+    st.stop()
 
-df_base = recalcular_saldos(df_base)
-df_resumo = calcular_resumo(df_base, limite_critico, limite_baixo)
+df = saldos(df)
+r = resumo(df, critico, baixo)
 
-# Métricas
-total_clientes = int(df_resumo["Cliente"].nunique()) if not df_resumo.empty else 0
-horas_compradas = float(df_resumo["Horas compradas"].sum()) if not df_resumo.empty else 0
-horas_usadas = float(df_resumo["Horas usadas"].sum()) if not df_resumo.empty else 0
-saldo_total = float(df_resumo["Saldo"].sum()) if not df_resumo.empty else 0
-alertas = int((df_resumo["Estado"] != "OK").sum()) if not df_resumo.empty else 0
+c1,c2,c3,c4,c5 = st.columns(5)
+c1.metric("Clientes", r["Cliente"].nunique() if not r.empty else 0)
+c2.metric("Horas compradas", f"{r['Horas compradas'].sum():.1f} h" if not r.empty else "0 h")
+c3.metric("Horas usadas", f"{r['Horas usadas'].sum():.1f} h" if not r.empty else "0 h")
+c4.metric("Saldo total", f"{r['Saldo'].sum():.1f} h" if not r.empty else "0 h")
+c5.metric("Alertas", int((r["Estado"]!="OK").sum()) if not r.empty else 0)
 
-col1, col2, col3, col4, col5 = st.columns(5)
-col1.metric("Clientes", f"{total_clientes}")
-col2.metric("Horas compradas", f"{horas_compradas:.1f} h")
-col3.metric("Horas usadas", f"{horas_usadas:.1f} h")
-col4.metric("Saldo total", f"{saldo_total:.1f} h")
-col5.metric("Alertas", f"{alertas}")
+tabs = st.tabs(["📊 Dashboard","👤 Cliente","👥 Clientes","➕ Registar movimento","🧾 Movimentos","📥 Importar","⬇️ Exportar"])
 
-st.divider()
-
-aba_dashboard, aba_cliente, aba_clientes, aba_registar, aba_movimentos, aba_importar, aba_exportar = st.tabs(
-    ["📊 Dashboard", "👤 Cliente", "👥 Clientes", "➕ Registar movimento", "🧾 Movimentos", "📥 Importar", "⬇️ Exportar"]
-)
-
-# ============================================================
-# DASHBOARD
-# ============================================================
-
-with aba_dashboard:
+with tabs[0]:
     st.subheader("Resumo por cliente")
+    f1,f2,f3 = st.columns([1.2,1.5,2])
+    estado = f1.selectbox("Estado", ["Todos"] + sorted(r["Estado"].dropna().unique().tolist()))
+    cliente = f2.selectbox("Cliente", ["Todos"] + sorted(r["Cliente"].dropna().unique().tolist()))
+    pesquisa = f3.text_input("Pesquisar")
+    rf = r.copy()
+    if estado != "Todos": rf = rf[rf["Estado"] == estado]
+    if cliente != "Todos": rf = rf[rf["Cliente"] == cliente]
+    if pesquisa: rf = rf[rf["Cliente"].str.contains(pesquisa, case=False, na=False)]
+    st.dataframe(rf, use_container_width=True, hide_index=True)
+    if not r.empty:
+        st.bar_chart(r.sort_values("Saldo").head(15).set_index("Cliente")[["Saldo"]])
 
-    c1, c2, c3 = st.columns([1.2, 1.5, 2])
-    with c1:
-        estados = ["Todos"] + sorted(df_resumo["Estado"].dropna().unique().tolist())
-        estado_sel = st.selectbox("Filtrar por estado", estados)
-    with c2:
-        clientes = ["Todos"] + sorted(df_resumo["Cliente"].dropna().unique().tolist())
-        cliente_sel = st.selectbox("Filtrar por cliente", clientes)
-    with c3:
-        pesquisa = st.text_input("Pesquisar cliente")
-
-    df_filtrado = df_resumo.copy()
-    if estado_sel != "Todos":
-        df_filtrado = df_filtrado[df_filtrado["Estado"] == estado_sel]
-    if cliente_sel != "Todos":
-        df_filtrado = df_filtrado[df_filtrado["Cliente"] == cliente_sel]
-    if pesquisa:
-        df_filtrado = df_filtrado[df_filtrado["Cliente"].str.contains(pesquisa, case=False, na=False)]
-
-    st.dataframe(
-        df_filtrado,
-        use_container_width=True,
-        hide_index=True,
-        column_config={
-            "Saldo": st.column_config.NumberColumn("Saldo", format="%.2f h"),
-            "Horas compradas": st.column_config.NumberColumn("Horas compradas", format="%.2f h"),
-            "Horas usadas": st.column_config.NumberColumn("Horas usadas", format="%.2f h"),
-            "Última intervenção": st.column_config.DateColumn("Última intervenção", format="DD/MM/YYYY"),
-        },
-    )
-
-    st.subheader("Clientes com saldo mais baixo")
-    if not df_resumo.empty:
-        grafico = df_resumo.sort_values("Saldo").head(15).set_index("Cliente")[["Saldo"]]
-        st.bar_chart(grafico)
+with tabs[1]:
+    st.subheader("Ficha do cliente")
+    clientes = sorted(df["Cliente"].dropna().unique().tolist())
+    if not clientes:
+        st.info("Ainda não existem clientes.")
     else:
-        st.info("Ainda não existem movimentos registados.")
+        cl = st.selectbox("Selecionar cliente", clientes)
+        st.dataframe(df[df["Cliente"] == cl], use_container_width=True, hide_index=True)
 
-# ============================================================
-# CLIENTE
-# ============================================================
-
-with aba_cliente:
-    st.subheader("Ficha individual de cliente")
-
-    lista_clientes = sorted(df_base["Cliente"].dropna().unique().tolist())
-    if not lista_clientes:
-        st.info("Ainda não existem clientes. Adicione o primeiro movimento no separador Registar movimento.")
-    else:
-        cliente_detalhe = st.selectbox("Selecionar cliente", lista_clientes, key="cliente_detalhe")
-
-        dados_cliente = df_base[df_base["Cliente"] == cliente_detalhe].copy()
-        resumo_cliente = df_resumo[df_resumo["Cliente"] == cliente_detalhe].iloc[0]
-
-        c1, c2, c3, c4 = st.columns(4)
-        c1.metric("Horas compradas", f"{resumo_cliente['Horas compradas']:.1f} h")
-        c2.metric("Horas usadas", f"{resumo_cliente['Horas usadas']:.1f} h")
-        c3.metric("Saldo", f"{resumo_cliente['Saldo']:.1f} h")
-        c4.markdown(
-            f"<div class='ci-card'>Estado<br><span class='{formatar_estado(resumo_cliente['Estado'])}'>{resumo_cliente['Estado']}</span></div>",
-            unsafe_allow_html=True,
-        )
-
-        st.write("Histórico de movimentos")
-        st.dataframe(
-            dados_cliente[
-                [
-                    "ID",
-                    "Data",
-                    "Tipo",
-                    "Solicitada por",
-                    "Técnico",
-                    "Descrição da intervenção",
-                    "Horas Pack",
-                    "Horas Usadas",
-                    "Saldo Automático",
-                    "Registado por",
-                    "Data de registo",
-                ]
-            ],
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Data": st.column_config.DateColumn("Data", format="DD/MM/YYYY"),
-                "Data de registo": st.column_config.DatetimeColumn("Data de registo", format="DD/MM/YYYY HH:mm"),
-                "Horas Pack": st.column_config.NumberColumn("Horas Pack", format="%.2f h"),
-                "Horas Usadas": st.column_config.NumberColumn("Horas Usadas", format="%.2f h"),
-                "Saldo Automático": st.column_config.NumberColumn("Saldo Automático", format="%.2f h"),
-            },
-        )
-
-
-# ============================================================
-# GESTÃO DE CLIENTES
-# ============================================================
-
-with aba_clientes:
+with tabs[2]:
     st.subheader("Gestão de clientes")
+    clientes = sorted(df["Cliente"].dropna().unique().tolist())
+    a,b = st.columns(2)
 
-    st.write(
-        "Aqui pode adicionar novos clientes sem necessidade de lançar logo uma intervenção "
-        "e pode apagar clientes da base de dados."
-    )
-
-    clientes_existentes = sorted(df_base["Cliente"].dropna().unique().tolist())
-
-    col_add, col_del = st.columns(2)
-
-    with col_add:
+    with a:
         st.markdown("### Adicionar cliente")
-
-        with st.form("form_adicionar_cliente", clear_on_submit=True):
-            novo_cliente = st.text_input("Nome do cliente")
-            contacto_cliente = st.text_input("Contacto / solicitado por", placeholder="Opcional")
-            horas_iniciais = st.number_input(
-                "Pack inicial de horas",
-                min_value=0.0,
-                value=0.0,
-                step=0.25,
-                help="Pode deixar a 0 e lançar o pack mais tarde.",
-            )
-            observacoes_cliente = st.text_area("Observações", placeholder="Opcional")
-            confirmar_add = st.checkbox("Confirmo que quero adicionar este cliente")
-            add_cliente = st.form_submit_button("Adicionar cliente")
-
-            if add_cliente:
-                cliente_final = novo_cliente.strip()
-                colaborador_final = colaborador.strip() or "Não identificado"
-
-                if not cliente_final:
-                    st.error("Indique o nome do cliente.")
-                elif cliente_final.lower() in [c.lower() for c in clientes_existentes]:
-                    st.error("Este cliente já existe.")
-                elif not confirmar_add:
-                    st.error("Confirme antes de adicionar.")
-                else:
-                    max_id = pd.to_numeric(df_base["ID"], errors="coerce").max()
-                    if pd.isna(max_id):
-                        max_id = 0
-
-                    lancamento_cliente = {
-                        "ID": int(max_id) + 1,
-                        "Cliente": cliente_final,
-                        "Data": pd.to_datetime(date.today()),
-                        "Tipo": "Cliente criado" if horas_iniciais == 0 else "Compra",
-                        "Solicitada por": contacto_cliente,
-                        "Técnico": "",
-                        "Descrição da intervenção": observacoes_cliente or "Cliente criado na app",
-                        "Horas Pack": float(horas_iniciais),
-                        "Horas Usadas": 0.0,
-                        "Saldo Automático": "",
-                        "Estado": "",
-                        "Saldo Original": "",
-                        "Origem": "App colaborativa",
-                        "Registado por": colaborador_final,
-                        "Data de registo": datetime.now(),
-                    }
-
-                    if modo_google:
-                        adicionar_lancamento_google(lancamento_cliente)
-                        st.cache_data.clear()
-                        st.cache_resource.clear()
-                        st.success("Cliente adicionado ao Google Sheets.")
-                        st.rerun()
-                    else:
-                        st.session_state["df_demo"] = pd.concat(
-                            [df_base, pd.DataFrame([lancamento_cliente])],
-                            ignore_index=True,
-                        )
-                        st.success("Cliente adicionado nesta sessão de demonstração.")
-                        st.rerun()
-
-    with col_del:
-        st.markdown("### Apagar cliente")
-
-        if not clientes_existentes:
-            st.info("Ainda não existem clientes para apagar.")
-        else:
-            cliente_apagar = st.selectbox("Cliente a apagar", clientes_existentes)
-
-            movimentos_cliente = df_base[df_base["Cliente"] == cliente_apagar]
-            st.warning(
-                f"Ao apagar este cliente serão removidos {len(movimentos_cliente)} movimento(s) "
-                "associado(s), incluindo histórico de compras e intervenções."
-            )
-
-            confirmar_nome = st.text_input(
-                "Para confirmar, escreva exatamente o nome do cliente",
-                key="confirmar_nome_cliente_apagar",
-            )
-            confirmar_delete = st.checkbox("Confirmo que quero apagar este cliente e o respetivo histórico")
-
-            if st.button("Apagar cliente"):
-                if confirmar_nome.strip() != cliente_apagar:
-                    st.error("O nome escrito não corresponde ao cliente selecionado.")
-                elif not confirmar_delete:
-                    st.error("Confirme a eliminação antes de continuar.")
-                else:
-                    novo_df = df_base[df_base["Cliente"] != cliente_apagar].copy()
-
-                    if modo_google:
-                        gravar_dataframe_google(novo_df)
-                        st.cache_data.clear()
-                        st.cache_resource.clear()
-                        st.success("Cliente apagado no Google Sheets.")
-                        st.rerun()
-                    else:
-                        st.session_state["df_demo"] = novo_df
-                        st.success("Cliente apagado nesta sessão de demonstração.")
-                        st.rerun()
-
-    st.divider()
-    st.markdown("### Lista atual de clientes")
-
-    if clientes_existentes:
-        clientes_df = df_resumo[["Cliente", "Horas compradas", "Horas usadas", "Saldo", "Estado"]].copy()
-        st.dataframe(
-            clientes_df,
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Horas compradas": st.column_config.NumberColumn("Horas compradas", format="%.2f h"),
-                "Horas usadas": st.column_config.NumberColumn("Horas usadas", format="%.2f h"),
-                "Saldo": st.column_config.NumberColumn("Saldo", format="%.2f h"),
-            },
-        )
-    else:
-        st.info("Ainda não existem clientes registados.")
-
-
-# ============================================================
-# REGISTAR MOVIMENTO
-# ============================================================
-
-with aba_registar:
-    st.subheader("Registar compra de pack ou horas utilizadas")
-
-    if not colaborador.strip():
-        st.warning("Indique o nome do colaborador na barra lateral antes de registar movimentos.")
-
-    clientes_existentes = sorted(df_base["Cliente"].dropna().unique().tolist())
-    tecnicos_existentes = TECNICOS_FIXOS
-
-    with st.form("form_novo_movimento", clear_on_submit=True):
-        col_a, col_b, col_c = st.columns(3)
-
-        with col_a:
-            cliente_base = st.selectbox("Cliente", ["Novo cliente"] + clientes_existentes)
-            novo_cliente = ""
-            if cliente_base == "Novo cliente":
-                novo_cliente = st.text_input("Nome do novo cliente")
-
-        with col_b:
-            data_movimento = st.date_input("Data", value=date.today(), format="DD/MM/YYYY")
-
-        with col_c:
-            tipo = st.selectbox("Tipo de movimento", TIPOS_MOVIMENTO)
-
-        col_d, col_e = st.columns(2)
-        with col_d:
-            solicitada_por = st.text_input("Solicitada por / contacto")
-        with col_e:
-            tecnico = st.selectbox("Técnico", [""] + tecnicos_existentes)
-
-        descricao = st.text_area("Descrição")
-
-        st.caption("Para compra de pack, preencher Horas Pack. Para intervenção, preencher Horas Usadas.")
-        col_f, col_g = st.columns(2)
-
-        with col_f:
-            horas_pack = st.number_input("Horas Pack compradas", min_value=0.0, value=0.0, step=0.25)
-
-        with col_g:
-            horas_usadas = st.number_input("Horas utilizadas", min_value=0.0, value=0.0, step=0.25)
-
-        confirmar = st.checkbox("Confirmo que os dados estão corretos")
-        submitted = st.form_submit_button("Guardar movimento")
-
-        if submitted:
-            cliente_final = novo_cliente.strip() if cliente_base == "Novo cliente" else cliente_base
-            colaborador_final = colaborador.strip()
-
-            if not colaborador_final:
-                st.error("Indique o nome do colaborador na barra lateral.")
-            elif not cliente_final:
-                st.error("Indique o nome do cliente.")
-            elif horas_pack == 0 and horas_usadas == 0:
-                st.error("Indique horas compradas ou horas utilizadas.")
-            elif not confirmar:
-                st.error("Confirme os dados antes de guardar.")
+        with st.form("add_cliente", clear_on_submit=True):
+            novo = st.text_input("Nome do cliente")
+            contacto = st.text_input("Contacto / solicitado por")
+            horas = st.number_input("Pack inicial de horas", min_value=0.0, value=0.0, step=0.25)
+            obs = st.text_area("Observações")
+            ok = st.checkbox("Confirmo")
+            sub = st.form_submit_button("Adicionar")
+        if sub:
+            if not novo.strip():
+                st.error("Indique o cliente.")
+            elif novo.strip().lower() in [x.lower() for x in clientes]:
+                st.error("Cliente já existe.")
+            elif not ok:
+                st.error("Confirme.")
             else:
-                max_id = pd.to_numeric(df_base["ID"], errors="coerce").max()
-                if pd.isna(max_id):
-                    max_id = 0
-
-                lancamento = {
-                    "ID": int(max_id) + 1,
-                    "Cliente": cliente_final,
-                    "Data": pd.to_datetime(data_movimento),
-                    "Tipo": tipo,
-                    "Solicitada por": solicitada_por,
-                    "Técnico": tecnico,
-                    "Descrição da intervenção": descricao,
-                    "Horas Pack": float(horas_pack),
-                    "Horas Usadas": float(horas_usadas),
-                    "Saldo Automático": "",
-                    "Estado": "",
-                    "Saldo Original": "",
-                    "Origem": "App colaborativa",
-                    "Registado por": colaborador_final,
-                    "Data de registo": datetime.now(),
+                max_id = pd.to_numeric(df["ID"], errors="coerce").max()
+                if pd.isna(max_id): max_id = 0
+                row = {
+                    "ID": int(max_id)+1, "Cliente": novo.strip(), "Data": datetime.now().strftime("%d/%m/%Y %H:%M:%S"),
+                    "Tipo": "Cliente criado" if horas == 0 else "Compra", "Solicitada por": contacto, "Técnico": "",
+                    "Descrição da intervenção": obs or "Cliente criado na app", "Horas Pack": float(horas), "Horas Usadas": 0.0,
+                    "Saldo Automático": "", "Estado": "", "Saldo Original": "", "Origem": "App",
+                    "Registado por": user.strip() or "Não identificado", "Data de registo": datetime.now().strftime("%d/%m/%Y %H:%M:%S")
                 }
-
-                if modo_google:
-                    adicionar_lancamento_google(lancamento)
-                    st.cache_data.clear()
-                    st.cache_resource.clear()
-                    st.success("Movimento guardado no Google Sheets. Todos os colaboradores passam a ver esta atualização.")
-                    st.rerun()
-                else:
-                    st.session_state["df_demo"] = pd.concat([df_base, pd.DataFrame([lancamento])], ignore_index=True)
-                    st.success("Movimento guardado apenas nesta sessão de demonstração.")
-                    st.rerun()
-
-# ============================================================
-# MOVIMENTOS
-# ============================================================
-
-with aba_movimentos:
-    st.subheader("Gestão de movimentos")
-
-    st.write(
-        "Aqui pode consultar, filtrar e apagar movimentos já registados. "
-        "Para acrescentar um novo movimento, use o separador **➕ Registar movimento**."
-    )
-
-    if df_base.empty:
-        st.info("Ainda não existem movimentos registados.")
-    else:
-        df_mov = df_base.copy()
-        df_mov["Data"] = pd.to_datetime(df_mov["Data"], errors="coerce")
-        df_mov["Data de registo"] = pd.to_datetime(df_mov["Data de registo"], errors="coerce")
-
-        col_f1, col_f2, col_f3 = st.columns([1.4, 1.4, 2])
-
-        with col_f1:
-            clientes_mov = ["Todos"] + sorted(df_mov["Cliente"].dropna().unique().tolist())
-            cliente_mov = st.selectbox("Filtrar por cliente", clientes_mov, key="mov_cliente")
-
-        with col_f2:
-            tipos_mov = ["Todos"] + sorted([x for x in df_mov["Tipo"].dropna().unique().tolist() if x])
-            tipo_mov = st.selectbox("Filtrar por tipo", tipos_mov, key="mov_tipo")
-
-        with col_f3:
-            pesquisa_mov = st.text_input(
-                "Pesquisar na descrição, técnico ou solicitado por",
-                key="mov_pesquisa",
-            )
-
-        df_mov_filtrado = df_mov.copy()
-
-        if cliente_mov != "Todos":
-            df_mov_filtrado = df_mov_filtrado[df_mov_filtrado["Cliente"] == cliente_mov]
-
-        if tipo_mov != "Todos":
-            df_mov_filtrado = df_mov_filtrado[df_mov_filtrado["Tipo"] == tipo_mov]
-
-        if pesquisa_mov:
-            termo = pesquisa_mov.lower()
-            df_mov_filtrado = df_mov_filtrado[
-                df_mov_filtrado["Descrição da intervenção"].fillna("").str.lower().str.contains(termo)
-                | df_mov_filtrado["Técnico"].fillna("").str.lower().str.contains(termo)
-                | df_mov_filtrado["Solicitada por"].fillna("").str.lower().str.contains(termo)
-            ]
-
-        df_mov_filtrado = df_mov_filtrado.sort_values(["Data", "ID"], ascending=[False, False])
-
-        st.markdown("### Lista de movimentos")
-
-        colunas_visiveis = [
-            "ID",
-            "Data",
-            "Cliente",
-            "Tipo",
-            "Solicitada por",
-            "Técnico",
-            "Descrição da intervenção",
-            "Horas Pack",
-            "Horas Usadas",
-            "Saldo Automático",
-            "Registado por",
-            "Data de registo",
-        ]
-
-        st.dataframe(
-            df_mov_filtrado[colunas_visiveis],
-            use_container_width=True,
-            hide_index=True,
-            column_config={
-                "Data": st.column_config.DateColumn("Data", format="DD/MM/YYYY"),
-                "Data de registo": st.column_config.DatetimeColumn("Data de registo", format="DD/MM/YYYY HH:mm"),
-                "Horas Pack": st.column_config.NumberColumn("Horas Pack", format="%.2f h"),
-                "Horas Usadas": st.column_config.NumberColumn("Horas Usadas", format="%.2f h"),
-                "Saldo Automático": st.column_config.NumberColumn("Saldo Automático", format="%.2f h"),
-            },
-        )
-
-        st.divider()
-        st.markdown("### Apagar movimento")
-
-        st.warning(
-            "Ao apagar um movimento, o saldo do cliente será recalculado automaticamente. "
-            "Esta ação remove a linha do histórico."
-        )
-
-        if df_mov_filtrado.empty:
-            st.info("Não existem movimentos nos filtros selecionados.")
-        else:
-            opcoes_mov = []
-            mapa_mov = {}
-
-            for _, row in df_mov_filtrado.iterrows():
-                data_txt = ""
-                if pd.notna(row.get("Data")):
-                    data_txt = pd.to_datetime(row.get("Data")).strftime("%d/%m/%Y")
-
-                horas_txt = ""
-                if float(row.get("Horas Pack", 0) or 0) > 0:
-                    horas_txt = f"+{float(row.get('Horas Pack', 0)):.2f}h pack"
-                elif float(row.get("Horas Usadas", 0) or 0) > 0:
-                    horas_txt = f"-{float(row.get('Horas Usadas', 0)):.2f}h usadas"
-                else:
-                    horas_txt = "0h"
-
-                label = (
-                    f"ID {int(row['ID'])} | {data_txt} | {row['Cliente']} | "
-                    f"{row['Tipo']} | {horas_txt}"
-                )
-
-                opcoes_mov.append(label)
-                mapa_mov[label] = int(row["ID"])
-
-            movimento_escolhido = st.selectbox(
-                "Selecionar movimento a apagar",
-                opcoes_mov,
-                key="movimento_apagar_select",
-            )
-
-            id_remover = mapa_mov.get(movimento_escolhido)
-
-            detalhe = df_base[pd.to_numeric(df_base["ID"], errors="coerce") == id_remover]
-            if not detalhe.empty:
-                st.write("Movimento selecionado:")
-                st.dataframe(
-                    detalhe[colunas_visiveis],
-                    use_container_width=True,
-                    hide_index=True,
-                )
-
-            confirmar_id = st.text_input(
-                "Para confirmar, escreva o ID do movimento",
-                key="confirmar_id_movimento",
-            )
-
-            confirmar_remocao = st.checkbox(
-                "Confirmo que quero apagar este movimento",
-                key="confirmar_delete_movimento",
-            )
-
-            if st.button("Apagar movimento selecionado"):
-                if str(id_remover) != confirmar_id.strip():
-                    st.error("O ID escrito não corresponde ao movimento selecionado.")
-                elif not confirmar_remocao:
-                    st.error("Confirme a eliminação antes de continuar.")
-                else:
-                    ids_numericos = pd.to_numeric(df_base["ID"], errors="coerce").astype("Int64")
-                    novo_df = df_base[ids_numericos != int(id_remover)].copy()
-                    novo_df = recalcular_saldos(novo_df)
-
-                    if modo_google:
-                        gravar_dataframe_google(novo_df)
-                        st.cache_data.clear()
-                        st.cache_resource.clear()
-                        st.success("Movimento apagado no Google Sheets e saldos recalculados.")
-                        st.rerun()
-                    else:
-                        st.session_state["df_demo"] = novo_df
-                        st.success("Movimento apagado nesta sessão de demonstração e saldos recalculados.")
-                        st.rerun()
-
-        st.divider()
-        st.markdown("### Acrescentar movimento")
-        st.info("Para acrescentar uma compra de pack, intervenção ou ajuste, use o separador **➕ Registar movimento**.")
-
-# ============================================================
-# IMPORTAR
-# ============================================================
-
-with aba_importar:
-    st.subheader("Importar dados iniciais para Google Sheets")
-
-    st.write(
-        "Use esta opção apenas uma vez, quando quiser passar os dados do Excel para a base colaborativa."
-    )
-
-    if not modo_google:
-        st.warning("Para importar para Google Sheets, configure primeiro os Secrets no Streamlit.")
-    else:
-        dados_demo = carregar_excel_demo()
-        st.write(f"Movimentos encontrados no Excel incluído: **{len(dados_demo)}**")
-
-        if st.checkbox("Confirmo que quero substituir os dados atuais do Google Sheets"):
-            if st.button("Importar Excel para Google Sheets"):
-                gravar_dataframe_google(dados_demo)
-                st.cache_data.clear()
-                st.cache_resource.clear()
-                st.success("Dados importados para Google Sheets.")
+                if modo: append(row)
+                else: st.session_state.demo = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+                st.success("Cliente adicionado.")
                 st.rerun()
 
-# ============================================================
-# EXPORTAR
-# ============================================================
+    with b:
+        st.markdown("### Apagar cliente")
+        if not clientes:
+            st.info("Sem clientes.")
+        else:
+            apagar = st.selectbox("Cliente a apagar", clientes)
+            st.warning(f"Vai remover {len(df[df['Cliente']==apagar])} movimento(s).")
+            conf = st.text_input("Escreva o nome do cliente")
+            ok2 = st.checkbox("Confirmo apagar cliente")
+            if st.button("Apagar cliente"):
+                if conf.strip() != apagar:
+                    st.error("Nome não corresponde.")
+                elif not ok2:
+                    st.error("Confirme.")
+                else:
+                    novo_df = df[df["Cliente"] != apagar].copy()
+                    if modo: replace_all(novo_df)
+                    else: st.session_state.demo = novo_df
+                    st.success("Cliente apagado.")
+                    st.rerun()
 
-with aba_exportar:
+with tabs[3]:
+    st.subheader("Registar movimento")
+    if not user.strip():
+        st.warning("Indique o nome do colaborador na barra lateral.")
+    clientes = sorted(df["Cliente"].dropna().unique().tolist())
+    with st.form("movimento", clear_on_submit=True):
+        c1,c2,c3 = st.columns(3)
+        cliente_sel = c1.selectbox("Cliente", ["Novo cliente"] + clientes)
+        novo_cliente = ""
+        if cliente_sel == "Novo cliente":
+            novo_cliente = st.text_input("Nome do novo cliente")
+        data_mov = c2.date_input("Data", value=date.today(), format="DD/MM/YYYY")
+        tipo = c3.selectbox("Tipo", TIPOS)
+        solicitada = st.text_input("Solicitada por / contacto")
+        tecnico = st.selectbox("Técnico", [""] + TECNICOS)
+        desc = st.text_area("Descrição")
+        h1,h2 = st.columns(2)
+        pack = h1.number_input("Horas Pack compradas", min_value=0.0, value=0.0, step=0.25)
+        usadas = h2.number_input("Horas utilizadas", min_value=0.0, value=0.0, step=0.25)
+        ok = st.checkbox("Confirmo os dados")
+        sub = st.form_submit_button("Guardar movimento")
+    if sub:
+        cliente_final = novo_cliente.strip() if cliente_sel == "Novo cliente" else cliente_sel
+        if not user.strip():
+            st.error("Indique colaborador.")
+        elif not cliente_final:
+            st.error("Indique cliente.")
+        elif pack == 0 and usadas == 0:
+            st.error("Indique horas.")
+        elif not ok:
+            st.error("Confirme.")
+        else:
+            max_id = pd.to_numeric(df["ID"], errors="coerce").max()
+            if pd.isna(max_id): max_id = 0
+            row = {
+                "ID": int(max_id)+1, "Cliente": cliente_final, "Data": pd.to_datetime(data_mov).strftime("%d/%m/%Y"),
+                "Tipo": tipo, "Solicitada por": solicitada, "Técnico": tecnico, "Descrição da intervenção": desc,
+                "Horas Pack": float(pack), "Horas Usadas": float(usadas), "Saldo Automático": "",
+                "Estado": "", "Saldo Original": "", "Origem": "App", "Registado por": user.strip(),
+                "Data de registo": datetime.now().strftime("%d/%m/%Y %H:%M:%S")
+            }
+            if modo: append(row)
+            else: st.session_state.demo = pd.concat([df, pd.DataFrame([row])], ignore_index=True)
+            st.success("Movimento guardado.")
+            st.rerun()
+
+with tabs[4]:
+    st.subheader("Movimentos")
+    if df.empty:
+        st.info("Sem movimentos.")
+    else:
+        st.dataframe(df.sort_values(["Data","ID"], ascending=[False,False], na_position="last"), use_container_width=True, hide_index=True)
+        st.markdown("### Apagar movimento")
+        ids = pd.to_numeric(df["ID"], errors="coerce").dropna().astype(int).tolist()
+        id_apagar = st.selectbox("ID do movimento", ids)
+        st.dataframe(df[pd.to_numeric(df["ID"], errors="coerce") == id_apagar], use_container_width=True, hide_index=True)
+        conf = st.text_input("Para confirmar, escreva o ID")
+        ok = st.checkbox("Confirmo apagar movimento")
+        if st.button("Apagar movimento"):
+            if conf.strip() != str(id_apagar):
+                st.error("ID não corresponde.")
+            elif not ok:
+                st.error("Confirme.")
+            else:
+                novo_df = saldos(df[pd.to_numeric(df["ID"], errors="coerce").astype("Int64") != int(id_apagar)].copy())
+                if modo: replace_all(novo_df)
+                else: st.session_state.demo = novo_df
+                st.success("Movimento apagado.")
+                st.rerun()
+
+with tabs[5]:
+    st.subheader("Importar Excel inicial para Google Sheet")
+    dados = excel_inicial()
+    st.write(f"Movimentos encontrados no Excel: **{len(dados)}**")
+    if not modo:
+        st.warning("Configure APPS_SCRIPT_WEBAPP_URL nos Secrets.")
+    else:
+        if st.checkbox("Confirmo substituir os dados atuais da Google Sheet"):
+            if st.button("Importar Excel"):
+                replace_all(dados)
+                st.success("Dados importados.")
+                st.rerun()
+
+with tabs[6]:
     st.subheader("Exportar Excel atualizado")
-
-    ficheiro_final = exportar_excel(df_base, df_resumo)
-
     st.download_button(
-        label="Descarregar Excel atualizado",
-        data=ficheiro_final,
-        file_name="PACKS_DE_HORAS_COLABORATIVO_ATUALIZADO.xlsx",
-        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        "Descarregar Excel",
+        data=export_excel(df, r),
+        file_name="PACKS_DE_HORAS_ATUALIZADO.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
     )
-
-    st.write("Pré-visualização dos dados que serão exportados:")
-    st.dataframe(df_resumo, use_container_width=True, hide_index=True)
+    st.dataframe(r, use_container_width=True, hide_index=True)
